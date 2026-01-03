@@ -37,6 +37,7 @@ from .data_loader import (
     HistoricalEpisodeEnv,
     download_and_prepare_data,
 )
+from .qc_data_loader import load_hybrid_episodes, QCHistoricalEpisodeEnv
 
 # Weights & Biases integration (optional)
 try:
@@ -368,7 +369,7 @@ def train_sac(
                 best_model_path = os.path.join(checkpoint_dir, 'best_model.pth')
                 agent.save(best_model_path)
                 if verbose:
-                    print(f"  ★ New best model saved!")
+                    print(f"  [*] New best model saved!")
 
                 # Best model logged at end of training via artifact
 
@@ -413,6 +414,183 @@ def train_sac(
 
     # Finish W&B run
     logger.finish()
+
+    return agent
+
+
+def train_hybrid(
+    pretrain_episodes: int = 5000,
+    finetune_episodes: int = 1000,
+    max_steps: int = 10,
+    batch_size: int = 256,
+    warmup_episodes: int = 100,
+    eval_frequency: int = 100,
+    save_frequency: int = 1000,
+    device: str = 'auto',
+    log_dir: str = 'logs/sac_hybrid',
+    checkpoint_dir: str = 'checkpoints',
+    seed: Optional[int] = None,
+    verbose: bool = True,
+    lr_actor: float = 3e-4,
+    lr_critic: float = 3e-4,
+    finetune_lr_factor: float = 0.1,
+    tau: float = 0.005,
+    use_wandb: bool = False,
+    wandb_project: str = 'stock-split-regression-sac',
+    wandb_run_name: Optional[str] = None,
+    wandb_entity: str = 'bzhou1018-uc-berkeley-electrical-engineering-computer-sc',
+    reward_type: str = 'simple',
+    raw_data_file: str = 'research/data/price_trajectories.pkl',
+    strategy_data_file: str = 'research/data/strategy_results.pkl',
+    include_catastrophic: bool = True,
+    catastrophic_ratio: float = 0.3,
+) -> SACAgent:
+    """
+    Hybrid training: pre-train on raw data, fine-tune on strategy data.
+
+    This approach addresses the limited strategy data problem:
+    1. Pre-train on 30K+ raw price trajectories (general risk patterns)
+    2. Fine-tune on 56 strategy trades (strategy-specific behavior)
+
+    Args:
+        pretrain_episodes: Training iterations for pre-training phase
+        finetune_episodes: Training iterations for fine-tuning phase
+        finetune_lr_factor: Learning rate multiplier for fine-tuning (0.1 = 10x smaller)
+        Other args: Same as train_sac
+
+    Returns:
+        Trained SACAgent
+    """
+    # Load hybrid data
+    data = load_hybrid_episodes(
+        raw_data_file=raw_data_file,
+        strategy_data_file=strategy_data_file,
+        include_catastrophic_synthetic=include_catastrophic,
+        catastrophic_ratio=catastrophic_ratio,
+    )
+
+    pretrain_train, pretrain_eval = data['pretrain']
+    finetune_train, finetune_eval = data['finetune']
+
+    if len(pretrain_train) == 0:
+        raise ValueError("No pre-training data found. Run export first.")
+
+    # Create pre-training environment
+    pretrain_env = QCHistoricalEpisodeEnv(pretrain_train, reward_type=reward_type)
+    pretrain_eval_env = QCHistoricalEpisodeEnv(pretrain_eval, reward_type=reward_type)
+
+    # ===== PHASE 1: PRE-TRAINING =====
+    if verbose:
+        print("\n" + "="*60)
+        print("PHASE 1: PRE-TRAINING on Raw Price Data")
+        print("="*60)
+        print(f"  Training episodes: {len(pretrain_train):,}")
+        print(f"  Iterations: {pretrain_episodes}")
+        print(f"  Learning rate: {lr_actor}")
+
+    agent = train_sac(
+        num_episodes=pretrain_episodes,
+        max_steps=max_steps,
+        batch_size=batch_size,
+        warmup_episodes=warmup_episodes,
+        eval_frequency=eval_frequency,
+        save_frequency=save_frequency,
+        device=device,
+        log_dir=os.path.join(log_dir, 'pretrain'),
+        checkpoint_dir=os.path.join(checkpoint_dir, 'pretrain'),
+        seed=seed,
+        verbose=verbose,
+        lr_actor=lr_actor,
+        lr_critic=lr_critic,
+        tau=tau,
+        use_wandb=use_wandb,
+        wandb_project=wandb_project,
+        wandb_run_name=f"{wandb_run_name}_pretrain" if wandb_run_name else None,
+        wandb_entity=wandb_entity,
+        env=pretrain_env,
+        eval_env=pretrain_eval_env,
+        data_mode='hybrid_pretrain',
+        num_training_episodes=len(pretrain_train),
+    )
+
+    # Save pre-trained model
+    pretrain_path = os.path.join(checkpoint_dir, 'pretrained_model.pth')
+    agent.save(pretrain_path)
+    if verbose:
+        print(f"\n  Pre-trained model saved: {pretrain_path}")
+
+    # ===== PHASE 2: FINE-TUNING =====
+    if len(finetune_train) == 0:
+        if verbose:
+            print("\n  No fine-tuning data available. Skipping Phase 2.")
+        return agent
+
+    if verbose:
+        print("\n" + "="*60)
+        print("PHASE 2: FINE-TUNING on Strategy Data")
+        print("="*60)
+        print(f"  Training episodes: {len(finetune_train)}")
+        print(f"  Iterations: {finetune_episodes}")
+        print(f"  Learning rate: {lr_actor * finetune_lr_factor} (reduced {finetune_lr_factor}x)")
+
+    # Create fine-tuning environment
+    finetune_env = QCHistoricalEpisodeEnv(finetune_train, reward_type=reward_type)
+    finetune_eval_env = QCHistoricalEpisodeEnv(finetune_eval, reward_type=reward_type) if finetune_eval else finetune_env
+
+    # Reduce learning rate for fine-tuning
+    finetune_lr = lr_actor * finetune_lr_factor
+
+    # Update agent's learning rates
+    for param_group in agent.actor_optim.param_groups:
+        param_group['lr'] = finetune_lr
+    for param_group in agent.critic_optim.param_groups:
+        param_group['lr'] = finetune_lr
+
+    # Continue training on strategy data
+    # Note: We're continuing with the same agent, not creating a new one
+    os.makedirs(os.path.join(log_dir, 'finetune'), exist_ok=True)
+    os.makedirs(os.path.join(checkpoint_dir, 'finetune'), exist_ok=True)
+
+    # Fine-tuning loop
+    best_eval_reward = float('-inf')
+    for episode in range(1, finetune_episodes + 1):
+        state = finetune_env.reset()
+        episode_reward = 0.0
+        done = False
+
+        while not done:
+            action = agent.select_action(state, evaluate=False)
+            next_state, reward, done, info = finetune_env.step(action[0])
+            agent.store_transition(state, action, reward, next_state, done)
+            agent.update()
+            state = next_state
+            episode_reward += reward
+
+        # Periodic evaluation
+        if episode % eval_frequency == 0:
+            eval_reward = evaluate_agent(agent, finetune_eval_env, num_episodes=min(10, len(finetune_eval)))
+            if verbose:
+                print(f"  Episode {episode}/{finetune_episodes} | "
+                      f"Train: {episode_reward:.4f} | Eval: {eval_reward:.4f}")
+
+            if eval_reward > best_eval_reward:
+                best_eval_reward = eval_reward
+                agent.save(os.path.join(checkpoint_dir, 'finetune', 'best_finetuned.pth'))
+                if verbose:
+                    print(f"    [*] New best fine-tuned model!")
+
+    # Save final fine-tuned model
+    final_path = os.path.join(checkpoint_dir, 'finetuned_model.pth')
+    agent.save(final_path)
+
+    if verbose:
+        print("\n" + "="*60)
+        print("HYBRID TRAINING COMPLETE")
+        print("="*60)
+        print(f"  Pre-trained model: {pretrain_path}")
+        print(f"  Fine-tuned model: {final_path}")
+        print(f"  Best eval reward: {best_eval_reward:.4f}")
+        print("="*60)
 
     return agent
 
@@ -587,6 +765,20 @@ def main():
     parser.add_argument('--qc-metadata-file', type=str, default='research/data/export_metadata.json',
                         help='Path to QC export metadata JSON file')
 
+    # Hybrid training (recommended for limited strategy data)
+    parser.add_argument('--hybrid', action='store_true',
+                        help='Use hybrid training: pre-train on raw data, fine-tune on strategy data')
+    parser.add_argument('--pretrain-episodes', type=int, default=5000,
+                        help='Number of pre-training iterations (default: 5000)')
+    parser.add_argument('--finetune-episodes', type=int, default=1000,
+                        help='Number of fine-tuning iterations (default: 1000)')
+    parser.add_argument('--finetune-lr-factor', type=float, default=0.1,
+                        help='Learning rate multiplier for fine-tuning (default: 0.1)')
+    parser.add_argument('--raw-data-file', type=str, default='research/data/price_trajectories.pkl',
+                        help='Path to raw price trajectories for pre-training')
+    parser.add_argument('--strategy-data-file', type=str, default='research/data/strategy_results.pkl',
+                        help='Path to strategy results for fine-tuning')
+
     # Evaluation mode
     parser.add_argument('--eval', type=str, default=None,
                         help='Path to checkpoint for evaluation')
@@ -614,6 +806,43 @@ def main():
         if args.wandb and not WANDB_AVAILABLE:
             print("Warning: wandb not installed. Install with: pip install wandb")
             print("Continuing without W&B logging...")
+
+        # ===== HYBRID TRAINING MODE (RECOMMENDED) =====
+        if args.hybrid:
+            print("\n" + "="*60)
+            print("HYBRID TRAINING MODE")
+            print("="*60)
+            print("Pre-training on raw price data, fine-tuning on strategy data")
+            print("="*60)
+
+            agent = train_hybrid(
+                pretrain_episodes=args.pretrain_episodes,
+                finetune_episodes=args.finetune_episodes,
+                max_steps=args.max_steps,
+                batch_size=args.batch_size,
+                warmup_episodes=args.warmup,
+                eval_frequency=args.eval_freq,
+                save_frequency=args.save_freq,
+                device=args.device,
+                log_dir=args.log_dir,
+                checkpoint_dir=args.checkpoint_dir,
+                seed=args.seed,
+                verbose=not args.quiet,
+                lr_actor=args.lr_actor,
+                lr_critic=args.lr_critic,
+                finetune_lr_factor=args.finetune_lr_factor,
+                tau=args.tau,
+                use_wandb=args.wandb,
+                wandb_project=args.wandb_project,
+                wandb_run_name=args.wandb_run_name,
+                wandb_entity=args.wandb_entity,
+                reward_type=args.reward_type,
+                raw_data_file=args.raw_data_file,
+                strategy_data_file=args.strategy_data_file,
+                include_catastrophic=args.include_catastrophic,
+                catastrophic_ratio=args.catastrophic_ratio,
+            )
+            return
 
         # Create environment based on mode
         env = None

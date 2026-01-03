@@ -1,14 +1,18 @@
 """
 Reassemble Data Chunks from QuantConnect Export
 
-Run this locally after copying chunks from the QuantConnect notebook output.
+Run this locally after downloading chunks from QuantConnect Object Store.
 
 Usage:
-    python research/tools/local/reassemble_chunks.py
+    # For Object Store pickle files (recommended):
+    python research/tools/local/reassemble_chunks.py --object-store ./downloads/
 
-You can either:
-    1. Paste chunks interactively when prompted
-    2. Save all output to a text file and provide the file path
+    # For text-based chunks (legacy):
+    python research/tools/local/reassemble_chunks.py notebook_output.txt
+
+Options:
+    --object-store DIR    Directory containing downloaded .pkl chunk files
+    FILE                  Text file with marker-based chunks (legacy)
 """
 
 import base64
@@ -17,7 +21,135 @@ import json
 import re
 import sys
 import zlib
+import glob
 from pathlib import Path
+
+
+def reassemble_object_store(directory: str, output_path: str = 'research/data/price_trajectories.pkl'):
+    """
+    Reassemble pickle chunks downloaded from QuantConnect Object Store.
+
+    Args:
+        directory: Directory containing strategy_results_chunk_N.pkl files
+        output_path: Where to save the combined file
+    """
+    print("\n" + "="*60)
+    print("REASSEMBLING OBJECT STORE CHUNKS")
+    print("="*60)
+
+    dir_path = Path(directory)
+
+    # Find all chunk files
+    chunk_pattern = str(dir_path / "*_chunk_*.pkl")
+    chunk_files = sorted(glob.glob(chunk_pattern))
+
+    if not chunk_files:
+        # Try alternate pattern
+        chunk_pattern = str(dir_path / "*.pkl")
+        chunk_files = [f for f in glob.glob(chunk_pattern) if 'metadata' not in f.lower()]
+        chunk_files = sorted(chunk_files)
+
+    if not chunk_files:
+        print(f"ERROR: No chunk files found in {directory}")
+        print(f"Looking for pattern: *_chunk_*.pkl or *.pkl")
+        return False
+
+    print(f"Found {len(chunk_files)} chunk files:")
+    for f in chunk_files:
+        print(f"  - {Path(f).name}")
+
+    # Load and combine all chunks
+    all_episodes = []
+    for chunk_file in chunk_files:
+        try:
+            with open(chunk_file, 'rb') as f:
+                chunk_data = pickle.load(f)
+            all_episodes.extend(chunk_data)
+            print(f"  Loaded {len(chunk_data)} episodes from {Path(chunk_file).name}")
+        except Exception as e:
+            print(f"  ERROR loading {chunk_file}: {e}")
+            return False
+
+    print(f"\nTotal episodes combined: {len(all_episodes)}")
+
+    # Load metadata if available
+    metadata_files = list(dir_path.glob("*metadata*.json"))
+    metadata = {}
+    if metadata_files:
+        try:
+            with open(metadata_files[0], 'r') as f:
+                metadata = json.load(f)
+            print(f"Loaded metadata from {metadata_files[0].name}")
+        except Exception as e:
+            print(f"Warning: Could not load metadata: {e}")
+
+    # Save combined file
+    output_file = Path(output_path)
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(output_file, 'wb') as f:
+        pickle.dump(all_episodes, f)
+
+    print(f"\nSaved combined data to: {output_file}")
+
+    # Save metadata
+    if metadata:
+        metadata['total_episodes'] = len(all_episodes)
+        metadata_out = output_file.parent / 'export_metadata.json'
+        with open(metadata_out, 'w') as f:
+            json.dump(metadata, f, indent=2)
+        print(f"Saved metadata to: {metadata_out}")
+
+    # Print summary
+    print_episode_summary(all_episodes)
+
+    return True
+
+
+def print_episode_summary(episodes):
+    """Print summary statistics for episodes."""
+    import numpy as np
+
+    print("\n" + "="*60)
+    print("DATA SUMMARY")
+    print("="*60)
+
+    if not episodes:
+        print("No episodes!")
+        return
+
+    print(f"Total episodes: {len(episodes)}")
+
+    symbols = set(e.get('symbol', 'unknown') for e in episodes)
+    print(f"Unique symbols: {len(symbols)}")
+
+    long_count = sum(1 for e in episodes if e.get('direction', 0) > 0)
+    short_count = sum(1 for e in episodes if e.get('direction', 0) < 0)
+    print(f"Long episodes: {long_count}")
+    print(f"Short episodes: {short_count}")
+
+    penny_count = sum(1 for e in episodes if e.get('is_penny_stock', False))
+    print(f"Penny stock episodes: {penny_count}")
+
+    # P&L statistics
+    pnl_key = 'final_pnl_pct' if 'final_pnl_pct' in episodes[0] else 'actual_return'
+    pnls = [e.get(pnl_key, 0) for e in episodes]
+    print(f"\nP&L Statistics ({pnl_key}):")
+    print(f"  Mean: {np.mean(pnls):.4f} ({np.mean(pnls)*100:.2f}%)")
+    print(f"  Std:  {np.std(pnls):.4f}")
+    print(f"  Min:  {np.min(pnls):.4f}")
+    print(f"  Max:  {np.max(pnls):.4f}")
+
+    # Check for prediction data
+    if 'predicted_return' in episodes[0]:
+        preds = [e.get('predicted_return', 0) for e in episodes]
+        corr = np.corrcoef(preds, pnls)[0, 1] if len(preds) > 1 else 0
+        print(f"\nPrediction Quality:")
+        print(f"  Prediction correlation: {corr:.4f}")
+        print(f"  Avg predicted: {np.mean(preds):.4f}")
+
+    print("\nReady for training:")
+    print("  python -m RL.risk_management.train --use-qc-data")
 
 
 def extract_from_file(filepath: str) -> tuple:
@@ -192,9 +324,29 @@ def main():
     print("QuantConnect Data Chunk Reassembler")
     print("="*60)
 
-    # Check if file provided as argument
+    # Check for --object-store flag
+    if len(sys.argv) > 1 and sys.argv[1] == '--object-store':
+        if len(sys.argv) < 3:
+            print("ERROR: --object-store requires a directory path")
+            print("Usage: python reassemble_chunks.py --object-store ./downloads/")
+            return
+
+        directory = sys.argv[2]
+        output_path = sys.argv[3] if len(sys.argv) > 3 else "research/data/price_trajectories.pkl"
+
+        reassemble_object_store(directory, output_path)
+        return
+
+    # Check if file provided as argument (legacy mode)
     if len(sys.argv) > 1:
         filepath = sys.argv[1]
+
+        # Check if it's a directory (Object Store mode)
+        if Path(filepath).is_dir():
+            output_path = sys.argv[2] if len(sys.argv) > 2 else "research/data/price_trajectories.pkl"
+            reassemble_object_store(filepath, output_path)
+            return
+
         print(f"\nReading from file: {filepath}")
         try:
             metadata, chunks = extract_from_file(filepath)
@@ -212,28 +364,38 @@ def main():
         reassemble(metadata, chunks, output_path)
     else:
         print("\nOptions:")
-        print("  1. Paste chunks interactively")
-        print("  2. Provide path to saved output file")
+        print("  1. Reassemble Object Store downloads (recommended)")
+        print("  2. Paste chunks interactively (legacy)")
+        print("  3. Provide path to saved text output file (legacy)")
 
-        choice = input("\nEnter choice (1 or 2), or file path: ").strip()
+        choice = input("\nEnter choice (1, 2, or 3): ").strip()
 
         if choice == "1":
-            metadata, chunks = interactive_input()
+            directory = input("Enter directory containing .pkl chunk files: ").strip()
+            output_path = input("Output path [research/data/price_trajectories.pkl]: ").strip()
+            if not output_path:
+                output_path = "research/data/price_trajectories.pkl"
+            reassemble_object_store(directory, output_path)
         elif choice == "2":
+            metadata, chunks = interactive_input()
+            output_path = input("\nOutput path [research/data/price_trajectories.pkl]: ").strip()
+            if not output_path:
+                output_path = "research/data/price_trajectories.pkl"
+            reassemble(metadata, chunks, output_path)
+        elif choice == "3":
             filepath = input("Enter file path: ").strip()
-            metadata, chunks = extract_from_file(filepath)
-        elif Path(choice).exists():
-            metadata, chunks = extract_from_file(choice)
+            try:
+                metadata, chunks = extract_from_file(filepath)
+            except Exception as e:
+                print(f"Error: {e}")
+                return
+            output_path = input("\nOutput path [research/data/price_trajectories.pkl]: ").strip()
+            if not output_path:
+                output_path = "research/data/price_trajectories.pkl"
+            reassemble(metadata, chunks, output_path)
         else:
             print("Invalid choice")
             return
-
-        # Reassemble
-        output_path = input("\nOutput path [research/data/price_trajectories.pkl]: ").strip()
-        if not output_path:
-            output_path = "research/data/price_trajectories.pkl"
-
-        reassemble(metadata, chunks, output_path)
 
 
 if __name__ == "__main__":

@@ -47,6 +47,7 @@ def load_qc_episodes(
     include_catastrophic_synthetic: bool = False,
     catastrophic_ratio: float = 0.5,
     min_trajectory_length: int = 24,
+    verbose: bool = True,
 ) -> Tuple[List[QCTradeEpisode], List[QCTradeEpisode]]:
     """
     Load episodes exported from QuantConnect and split into train/eval.
@@ -73,13 +74,15 @@ def load_qc_episodes(
             "  3. Download price_trajectories.pkl"
         )
 
-    print(f"Loading QuantConnect episodes from {episodes_file}...")
+    if verbose:
+        print(f"Loading QuantConnect episodes from {episodes_file}...")
 
     # Load episodes
     with open(episodes_path, 'rb') as f:
         raw_episodes = pickle.load(f)
 
-    print(f"  Raw episodes loaded: {len(raw_episodes)}")
+    if verbose:
+        print(f"  Raw episodes loaded: {len(raw_episodes)}")
 
     # Convert to QCTradeEpisode objects with data validation
     episodes = []
@@ -136,13 +139,14 @@ def load_qc_episodes(
         ))
 
     total_skipped = skipped_short + skipped_price + skipped_pnl
-    print(f"  Valid episodes: {len(episodes)} (skipped {total_skipped})")
-    if skipped_price > 0:
-        print(f"    - Skipped {skipped_price} with corrupted prices (>${MAX_VALID_PRICE:,})")
-    if skipped_short > 0:
-        print(f"    - Skipped {skipped_short} with short trajectories (<{min_trajectory_length})")
-    if skipped_pnl > 0:
-        print(f"    - Skipped {skipped_pnl} with NaN/Inf P&L")
+    if verbose:
+        print(f"  Valid episodes: {len(episodes)} (skipped {total_skipped})")
+        if skipped_price > 0:
+            print(f"    - Skipped {skipped_price} with corrupted prices (>${MAX_VALID_PRICE:,})")
+        if skipped_short > 0:
+            print(f"    - Skipped {skipped_short} with short trajectories (<{min_trajectory_length})")
+        if skipped_pnl > 0:
+            print(f"    - Skipped {skipped_pnl} with NaN/Inf P&L")
 
     # Load metadata if available
     if metadata_file:
@@ -150,8 +154,9 @@ def load_qc_episodes(
         if metadata_path.exists():
             with open(metadata_path, 'r') as f:
                 metadata = json.load(f)
-            print(f"  Export date: {metadata.get('export_date', 'unknown')}")
-            print(f"  Date range: {metadata.get('date_range', {})}")
+            if verbose:
+                print(f"  Export date: {metadata.get('export_date', 'unknown')}")
+                print(f"  Date range: {metadata.get('date_range', {})}")
 
     # Group episodes by their original split event (symbol + date)
     # This prevents data leakage from augmented episodes of the same split
@@ -173,32 +178,117 @@ def load_qc_episodes(
     train_episodes = [ep for _, eps in train_events for ep in eps]
     eval_episodes = [ep for _, eps in eval_events for ep in eps]
 
-    print(f"\n  TIME-BASED SPLIT (by split event to prevent leakage):")
-    print(f"    Unique split events: {len(sorted_events)}")
-    print(f"    Training: {len(train_episodes)} episodes from {len(train_events)} events")
-    print(f"    Evaluation: {len(eval_episodes)} episodes from {len(eval_events)} events")
+    if verbose:
+        print(f"\n  TIME-BASED SPLIT (by split event to prevent leakage):")
+        print(f"    Unique split events: {len(sorted_events)}")
+        print(f"    Training: {len(train_episodes)} episodes from {len(train_events)} events")
+        print(f"    Evaluation: {len(eval_episodes)} episodes from {len(eval_events)} events")
 
-    if train_events and eval_events:
-        train_start = train_events[0][0][1]
-        train_end = train_events[-1][0][1]
-        eval_start = eval_events[0][0][1]
-        eval_end = eval_events[-1][0][1]
-        print(f"    Training range: {train_start} to {train_end}")
-        print(f"    Eval range: {eval_start} to {eval_end}")
-        print(f"    No overlap: {train_end < eval_start}")
+        if train_events and eval_events:
+            train_start = train_events[0][0][1]
+            train_end = train_events[-1][0][1]
+            eval_start = eval_events[0][0][1]
+            eval_end = eval_events[-1][0][1]
+            print(f"    Training range: {train_start} to {train_end}")
+            print(f"    Eval range: {eval_start} to {eval_end}")
+            print(f"    No overlap: {train_end < eval_start}")
 
     # Add synthetic catastrophic scenarios to training only
     if include_catastrophic_synthetic:
         num_catastrophic = int(len(train_episodes) * catastrophic_ratio)
         catastrophic = create_catastrophic_scenarios(num_catastrophic)
         train_episodes = train_episodes + catastrophic
-        print(f"\n  Added {num_catastrophic} synthetic catastrophic scenarios to training")
+        if verbose:
+            print(f"\n  Added {num_catastrophic} synthetic catastrophic scenarios to training")
 
     # Print statistics
-    _print_episode_stats(train_episodes, "Training")
-    _print_episode_stats(eval_episodes, "Evaluation")
+    if verbose:
+        _print_episode_stats(train_episodes, "Training")
+        _print_episode_stats(eval_episodes, "Evaluation")
 
     return train_episodes, eval_episodes
+
+
+def load_hybrid_episodes(
+    raw_data_file: str = 'research/data/price_trajectories.pkl',
+    strategy_data_file: str = 'research/data/strategy_results.pkl',
+    train_ratio: float = 0.8,
+    include_catastrophic_synthetic: bool = True,
+    catastrophic_ratio: float = 0.3,
+    min_trajectory_length: int = 24,
+) -> Dict[str, Tuple[List[QCTradeEpisode], List[QCTradeEpisode]]]:
+    """
+    Load data for hybrid training approach.
+
+    Hybrid training:
+    1. Pre-train on raw price data (30K+ episodes) - general market behavior
+    2. Fine-tune on strategy data (56+ episodes) - actual strategy trades
+
+    Args:
+        raw_data_file: Path to price_trajectories.pkl (large dataset)
+        strategy_data_file: Path to strategy_results.pkl (strategy-specific)
+        train_ratio: Train/eval split ratio
+        include_catastrophic_synthetic: Add synthetic catastrophic scenarios
+        catastrophic_ratio: Ratio of catastrophic to normal episodes
+        min_trajectory_length: Minimum trajectory length in hours
+
+    Returns:
+        Dict with 'pretrain' and 'finetune' keys, each containing
+        (train_episodes, eval_episodes) tuples
+    """
+    print("\n" + "="*60)
+    print("HYBRID DATA LOADING")
+    print("="*60)
+
+    result = {}
+
+    # Load raw price data for pre-training
+    print("\n[Phase 1] Loading raw price data for pre-training...")
+    raw_path = Path(raw_data_file)
+    if raw_path.exists():
+        pretrain_train, pretrain_eval = load_qc_episodes(
+            episodes_file=raw_data_file,
+            train_ratio=train_ratio,
+            include_catastrophic_synthetic=include_catastrophic_synthetic,
+            catastrophic_ratio=catastrophic_ratio,
+            min_trajectory_length=min_trajectory_length,
+            verbose=True,
+        )
+        result['pretrain'] = (pretrain_train, pretrain_eval)
+        print(f"  Pre-training data: {len(pretrain_train)} train, {len(pretrain_eval)} eval")
+    else:
+        print(f"  WARNING: Raw data not found: {raw_data_file}")
+        result['pretrain'] = ([], [])
+
+    # Load strategy data for fine-tuning
+    print("\n[Phase 2] Loading strategy data for fine-tuning...")
+    strategy_path = Path(strategy_data_file)
+    if strategy_path.exists():
+        finetune_train, finetune_eval = load_qc_episodes(
+            episodes_file=strategy_data_file,
+            train_ratio=train_ratio,
+            include_catastrophic_synthetic=False,  # No synthetic for strategy data
+            min_trajectory_length=min_trajectory_length,
+            verbose=True,
+        )
+        result['finetune'] = (finetune_train, finetune_eval)
+        print(f"  Fine-tuning data: {len(finetune_train)} train, {len(finetune_eval)} eval")
+    else:
+        print(f"  WARNING: Strategy data not found: {strategy_data_file}")
+        result['finetune'] = ([], [])
+
+    # Summary
+    print("\n" + "-"*40)
+    print("HYBRID DATA SUMMARY")
+    print("-"*40)
+    pretrain_total = len(result['pretrain'][0]) + len(result['pretrain'][1])
+    finetune_total = len(result['finetune'][0]) + len(result['finetune'][1])
+    print(f"  Pre-training episodes: {pretrain_total:,}")
+    print(f"  Fine-tuning episodes: {finetune_total}")
+    print(f"  Ratio: {pretrain_total/max(finetune_total,1):.0f}x more pre-training data")
+    print("="*60 + "\n")
+
+    return result
 
 
 def create_catastrophic_scenarios(
@@ -297,7 +387,7 @@ class QCHistoricalEpisodeEnv:
         self.episodes = episodes
         self.reward_fn = create_reward_function(reward_type, reward_config)
 
-        self.state_dim = 12
+        self.state_dim = 11  # No predicted_return (prevents data leakage)
         self.action_dim = 1
 
         self._current_episode: Optional[QCTradeEpisode] = None
@@ -318,11 +408,12 @@ class QCHistoricalEpisodeEnv:
         ep = self._current_episode
         from .environment import TradeState
 
+        # Note: predicted_return removed to prevent data leakage
+        # The RL agent manages risk based on observable signals only
         self._trade_state = TradeState(
             direction=ep.direction,
             size_pct=0.25,
             days_held=0,
-            predicted_return=ep.final_pnl_pct * 0.5,  # Noisy prediction
             entry_price=ep.entry_price,
             current_price=ep.entry_price,
             unrealized_pnl_pct=0.0,

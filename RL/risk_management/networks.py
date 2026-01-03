@@ -22,7 +22,7 @@ class GaussianPolicy(nn.Module):
         Input (state_dim) -> 256 -> 256 -> mean + log_std heads
     """
 
-    def __init__(self, state_dim: int = 12, action_dim: int = 1, hidden_dim: int = 256):
+    def __init__(self, state_dim: int = 11, action_dim: int = 1, hidden_dim: int = 256):
         super().__init__()
 
         # Shared feature extractor
@@ -145,7 +145,7 @@ class QNetwork(nn.Module):
         Input (state_dim + action_dim) -> 256 -> 256 -> 1 (for each Q)
     """
 
-    def __init__(self, state_dim: int = 12, action_dim: int = 1, hidden_dim: int = 256):
+    def __init__(self, state_dim: int = 11, action_dim: int = 1, hidden_dim: int = 256):
         super().__init__()
 
         input_dim = state_dim + action_dim
@@ -212,8 +212,8 @@ class QNetwork(nn.Module):
 if __name__ == "__main__":
     # Test the networks
     print("Testing GaussianPolicy...")
-    policy = GaussianPolicy(state_dim=12, action_dim=1)
-    state = torch.randn(32, 12)  # Batch of 32 states
+    policy = GaussianPolicy(state_dim=11, action_dim=1)
+    state = torch.randn(32, 11)  # Batch of 32 states
 
     action, log_prob, mean = policy.sample(state)
     print(f"  State shape: {state.shape}")
@@ -222,7 +222,7 @@ if __name__ == "__main__":
     print(f"  Action range: [{action.min().item():.3f}, {action.max().item():.3f}]")
 
     print("\nTesting QNetwork...")
-    critic = QNetwork(state_dim=12, action_dim=1)
+    critic = QNetwork(state_dim=11, action_dim=1)
     q1, q2 = critic(state, action)
     print(f"  Q1 shape: {q1.shape}")
     print(f"  Q2 shape: {q2.shape}")

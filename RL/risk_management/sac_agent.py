@@ -40,7 +40,7 @@ class SACAgent:
 
     def __init__(
         self,
-        state_dim: int = 12,
+        state_dim: int = 11,
         action_dim: int = 1,
         hidden_dim: int = 256,
         gamma: float = 0.99,
@@ -57,7 +57,7 @@ class SACAgent:
         Initialize SAC Agent.
 
         Args:
-            state_dim: Dimension of state space (default 12 for risk state)
+            state_dim: Dimension of state space (default 11 for risk state)
             action_dim: Dimension of action space (default 1 for position multiplier)
             hidden_dim: Hidden layer size for networks
             gamma: Discount factor for future rewards
@@ -324,7 +324,7 @@ class SACAgent:
 
 
 def create_sac_agent(
-    state_dim: int = 12,
+    state_dim: int = 11,
     action_dim: int = 1,
     device: str = 'auto',
     **kwargs
@@ -333,7 +333,7 @@ def create_sac_agent(
     Factory function to create a SAC agent with default risk management settings.
 
     Args:
-        state_dim: State dimension (default 12 for risk state)
+        state_dim: State dimension (default 11 for risk state)
         action_dim: Action dimension (default 1 for position multiplier)
         device: Device to use
         **kwargs: Additional arguments passed to SACAgent
@@ -365,12 +365,12 @@ if __name__ == "__main__":
     # Test the SAC agent
     print("Testing SACAgent...")
 
-    agent = create_sac_agent(state_dim=12, action_dim=1)
+    agent = create_sac_agent(state_dim=11, action_dim=1)
     print(f"  Device: {agent.device}")
     print(f"  Initial alpha: {agent.alpha.item():.4f}")
 
     # Test action selection
-    state = np.random.randn(12).astype(np.float32)
+    state = np.random.randn(11).astype(np.float32)
     action = agent.select_action(state)
     print(f"  Sample action: {action}")
     print(f"  Position multiplier: {agent.action_to_multiplier(action[0]):.3f}")

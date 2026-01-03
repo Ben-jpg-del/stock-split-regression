@@ -461,7 +461,7 @@ class HistoricalEpisodeEnv:
         self.episodes = episodes
         self.reward_fn = SACRiskReward(reward_config)
 
-        self.state_dim = 12
+        self.state_dim = 11  # No predicted_return (prevents data leakage)
         self.action_dim = 1
 
         self._current_episode: Optional[TradeEpisode] = None

@@ -352,6 +352,9 @@ class SplitEventsAlgorithm(QCAlgorithm):
         # Volatility ratio (estimate from recent moves)
         volatility_ratio = 1.0  # Default, could be enhanced with actual calculation
 
+        # Price vs SMA (simplified - 0 for new entry)
+        price_vs_sma = 0.0
+
         # Margin usage
         margin_used = self.portfolio.total_margin_used
         margin_remaining = self.portfolio.margin_remaining
@@ -363,22 +366,20 @@ class SplitEventsAlgorithm(QCAlgorithm):
         )
         portfolio_heat = total_holdings_value / portfolio_value if portfolio_value > 0 else 0.0
 
-        # Is penny stock check (price < $5)
-        is_penny = security.price < 5.0
-
+        # Build 11-dim state (no predicted_return to prevent data leakage)
+        # Must match training state format in environment.py
         state = np.array([
             direction,           # 0
             size_pct,            # 1
             days_held / 3.0,     # 2 (normalized by hold duration)
-            predicted_return,    # 3
-            0.0,                 # 4 (unrealized_pnl_pct - 0 for new entry)
-            0.0,                 # 5 (max_drawdown_pct - 0 for new entry)
-            0.0,                 # 6 (pnl_velocity - 0 for new entry)
-            sector_roc,          # 7
-            volatility_ratio,    # 8
+            0.0,                 # 3 (unrealized_pnl_pct - 0 for new entry)
+            0.0,                 # 4 (max_drawdown_pct - 0 for new entry)
+            0.0,                 # 5 (pnl_velocity - 0 for new entry)
+            sector_roc,          # 6
+            volatility_ratio,    # 7
+            price_vs_sma,        # 8
             margin_usage,        # 9
             portfolio_heat,      # 10
-            is_penny,            # 11 (is_penny_stock)
         ], dtype=np.float32)
 
         return state

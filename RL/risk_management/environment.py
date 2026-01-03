@@ -9,10 +9,16 @@ from .reward_functions import SACRiskReward, RiskRewardConfig
 
 @dataclass
 class TradeState:
+    """
+    State representation for risk management.
+
+    NOTE: predicted_return was removed to prevent data leakage during training.
+    The RL agent should make risk decisions based on observable market conditions,
+    not the regression model's prediction (which would leak future information).
+    """
     direction: float = 0.0         # 1.0 long, -1.0 short, 0.0 flat
     size_pct: float = 0.0          # Position size as % of portfolio
     days_held: int = 0             # Days in trade
-    predicted_return: float = 0.0  # Model's predicted return
 
     # P&L info
     entry_price: float = 0.0       # Entry price
@@ -32,16 +38,15 @@ class TradeState:
     portfolio_heat: float = 0.0    # Total portfolio risk exposure
 
     # Stock info
-    is_penny_stock: bool = False   # True if price < $1
+    is_penny_stock: bool = False   # True if price < $5
     stock_price: float = 0.0       # Current stock price
 
     def to_array(self) -> np.ndarray:
-        """Convert state to 12-dimensional numpy array."""
+        """Convert state to 11-dimensional numpy array (no predicted_return)."""
         return np.array([
             self.direction,
             self.size_pct,
             self.days_held / 3.0,  # Normalize by hold duration
-            self.predicted_return,
             self.unrealized_pnl_pct,
             self.max_drawdown_pct,
             self.pnl_velocity,
@@ -60,19 +65,22 @@ class TradingRiskEnv:
     The environment simulates individual trade episodes where the agent
     must decide how much position to maintain (via position multiplier).
 
-    State Space (12 dimensions):
+    This is a RISK MANAGEMENT layer on top of the regression strategy.
+    The regression strategy decides WHAT to trade and WHEN.
+    This RL agent decides HOW MUCH position to hold based on risk.
+
+    State Space (11 dimensions - no predicted_return to avoid data leakage):
         0. direction: Trade direction (1=long, -1=short, 0=flat)
         1. size_pct: Position size as % of portfolio
         2. days_held: Normalized days in trade (0-1)
-        3. predicted_return: Model's predicted return
-        4. unrealized_pnl_pct: Current unrealized P&L %
-        5. max_drawdown_pct: Maximum drawdown during trade
-        6. pnl_velocity: Rate of P&L change
-        7. sector_roc: Sector momentum indicator
-        8. volatility_ratio: Current vol / historical vol
-        9. price_vs_sma: Price relative to moving average
-        10. margin_usage: Current margin utilization
-        11. portfolio_heat: Total portfolio risk exposure
+        3. unrealized_pnl_pct: Current unrealized P&L %
+        4. max_drawdown_pct: Maximum drawdown during trade
+        5. pnl_velocity: Rate of P&L change
+        6. sector_roc: Sector momentum indicator
+        7. volatility_ratio: Current vol / historical vol
+        8. price_vs_sma: Price relative to moving average
+        9. margin_usage: Current margin utilization
+        10. portfolio_heat: Total portfolio risk exposure
 
     Action Space:
         Continuous [-1, 1] mapped to position multiplier [0, 1]
@@ -81,7 +89,7 @@ class TradingRiskEnv:
         +1 = full position
 
     Reward:
-        From SACRiskReward function (asymmetric, risk-adjusted)
+        From reward function (configurable via --reward-type)
     """
 
     def __init__(
@@ -111,7 +119,7 @@ class TradingRiskEnv:
         self.synthetic_mode = synthetic_mode
 
         # Dimensions
-        self.state_dim = 12
+        self.state_dim = 11  # No predicted_return (prevents data leakage)
         self.action_dim = 1
 
         # Reward function

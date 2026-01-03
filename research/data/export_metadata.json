@@ -1,38 +1,43 @@
 {
-  "export_date": "2026-01-02T10:32:27.548090",
-  "config": {
-    "start_date": "2010-01-01 00:00:00",
-    "end_date": "2025-12-31 00:00:00",
-    "hold_duration_days": "3",
-    "price_resolution": "Hour",
-    "hours_before_split": "24",
-    "hours_after_split": "72",
-    "sector_etf": "XLK",
-    "sector_roc_period": "22",
-    "batch_size": "50",
-    "batch_delay_seconds": "1",
-    "include_sectors": "[311, 308, 102, 206, 103]",
-    "include_split_occurred": "True",
-    "augment_time_offsets": "[-12, -6, 0, 6, 12]",
-    "augment_hold_durations": "[24, 48, 72]",
-    "output_episodes": "training_episodes.csv",
-    "output_prices": "price_trajectories.pkl",
-    "output_metadata": "export_metadata.json"
-  },
-  "total_episodes": 30642,
-  "unique_symbols": 1245,
-  "date_range": {
-    "start": "2010-01-01T00:00:00",
-    "end": "2025-12-31T00:00:00"
-  },
-  "statistics": {
-    "long_episodes": 15321,
-    "short_episodes": 15321,
-    "penny_stock_episodes": 8010,
-    "avg_pnl_long": -0.0037655702497824918,
-    "avg_pnl_short": 0.0037655702497824918
-  },
-  "num_chunks": 24,
-  "total_b64_size": 1174720,
-  "compressed": true
+  "total_episodes": 444,
+  "compressed": false,
+  "total_b64_size": 211488,
+  "num_chunks": 1,
+  "original_metadata": {
+    "export_date": "2026-01-03T04:37:44.481597",
+    "config": {
+      "start_date": "2010-01-01 00:00:00",
+      "end_date": "2025-12-31 00:00:00",
+      "hold_duration_days": "3",
+      "lookback_days": "30",
+      "min_training_samples": "5",
+      "position_size_pct": "0.25",
+      "price_resolution": "Hour",
+      "hours_after_split": "72",
+      "sector_etf": "XLK",
+      "sector_roc_period": "22",
+      "batch_size": "50",
+      "batch_delay_seconds": "1",
+      "include_sectors": "[311, 308, 102]",
+      "chunk_size": "1000",
+      "output_prefix": "strategy_results"
+    },
+    "total_episodes": 444,
+    "num_chunks": 1,
+    "chunk_size": 1000,
+    "unique_symbols": 311,
+    "date_range": {
+      "start": "2010-12-23T00:00:00",
+      "end": "2025-12-24T00:00:00"
+    },
+    "statistics": {
+      "long_trades": 99,
+      "short_trades": 345,
+      "avg_predicted_return": -0.13080032030535169,
+      "avg_actual_return": 0.07510144214365859,
+      "prediction_correlation": -0.09393330111417184,
+      "win_rate": 0.6599099099099099,
+      "avg_r2": 0.213107103191035
+    }
+  }
 }

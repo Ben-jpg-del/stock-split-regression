@@ -38,12 +38,12 @@ def export_policy_to_json(checkpoint_path: str, output_path: str = None):
 
     # Also save network architecture info
     export_data = {
-        'version': '1.0',
+        'version': '2.0',  # Updated: no predicted_return in state
         'algorithm': 'SAC',
         'description': 'Risk management policy for stock split strategy',
         'weights': weights,
         'architecture': {
-            'state_dim': 12,
+            'state_dim': 11,  # No predicted_return (prevents data leakage)
             'action_dim': 1,
             'hidden_dims': [256, 256],
             'activation': 'relu',
@@ -138,7 +138,8 @@ class SACRiskPolicy:
         Get position multiplier from state.
 
         Args:
-            state: 12-dim state vector [direction, size_pct, days_held, ...]
+            state: 11-dim state vector [direction, size_pct, days_held, ...]
+                   Note: predicted_return was removed to prevent data leakage
 
         Returns:
             Position multiplier in [0, 1]
