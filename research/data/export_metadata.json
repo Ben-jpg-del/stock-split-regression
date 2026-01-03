@@ -1,0 +1,38 @@
+{
+  "export_date": "2026-01-02T10:32:27.548090",
+  "config": {
+    "start_date": "2010-01-01 00:00:00",
+    "end_date": "2025-12-31 00:00:00",
+    "hold_duration_days": "3",
+    "price_resolution": "Hour",
+    "hours_before_split": "24",
+    "hours_after_split": "72",
+    "sector_etf": "XLK",
+    "sector_roc_period": "22",
+    "batch_size": "50",
+    "batch_delay_seconds": "1",
+    "include_sectors": "[311, 308, 102, 206, 103]",
+    "include_split_occurred": "True",
+    "augment_time_offsets": "[-12, -6, 0, 6, 12]",
+    "augment_hold_durations": "[24, 48, 72]",
+    "output_episodes": "training_episodes.csv",
+    "output_prices": "price_trajectories.pkl",
+    "output_metadata": "export_metadata.json"
+  },
+  "total_episodes": 30642,
+  "unique_symbols": 1245,
+  "date_range": {
+    "start": "2010-01-01T00:00:00",
+    "end": "2025-12-31T00:00:00"
+  },
+  "statistics": {
+    "long_episodes": 15321,
+    "short_episodes": 15321,
+    "penny_stock_episodes": 8010,
+    "avg_pnl_long": -0.0037655702497824918,
+    "avg_pnl_short": 0.0037655702497824918
+  },
+  "num_chunks": 24,
+  "total_b64_size": 1174720,
+  "compressed": true
+}

@@ -1,4 +1,6 @@
 from AlgorithmImports import *
+import numpy as np
+import json
 
 
 from sklearn.linear_model import LinearRegression
@@ -6,9 +8,90 @@ from sklearn.utils.validation import check_is_fitted
 from sklearn.exceptions import NotFittedError
 
 
+# ============================================================
+# SAC RISK POLICY - NUMPY INFERENCE (no PyTorch required)
+# ============================================================
+
+class SACRiskPolicy:
+    """
+    Numpy-only implementation of SAC actor for risk management.
+    Outputs position multiplier [0, 1] given trade state.
+    """
+
+    def __init__(self, policy_json: str = None, policy_dict: dict = None):
+        """
+        Initialize from JSON string or dict.
+
+        Args:
+            policy_json: JSON string of exported policy
+            policy_dict: Pre-loaded policy dict
+        """
+        self.weights = None
+        self.architecture = {}
+
+        if policy_dict is not None:
+            self._load_from_dict(policy_dict)
+        elif policy_json is not None:
+            policy_dict = json.loads(policy_json)
+            self._load_from_dict(policy_dict)
+
+    def _load_from_dict(self, policy_dict: dict):
+        """Load weights from policy dict."""
+        self.weights = {}
+        for key, value in policy_dict['weights'].items():
+            self.weights[key] = np.array(value, dtype=np.float32)
+        self.architecture = policy_dict.get('architecture', {})
+
+    def _relu(self, x):
+        return np.maximum(0, x)
+
+    def _tanh(self, x):
+        return np.tanh(x)
+
+    def get_position_multiplier(self, state: np.ndarray) -> float:
+        """
+        Get position multiplier from state.
+
+        Args:
+            state: 12-dim state vector
+
+        Returns:
+            Position multiplier in [0, 1]
+            - 1.0 = full position (no risk reduction)
+            - 0.0 = close position entirely
+        """
+        if self.weights is None:
+            return 1.0  # Default: no risk adjustment
+
+        x = state.flatten().astype(np.float32)
+
+        # Forward pass through actor network
+        # fc1
+        x = x @ self.weights['fc1.weight'].T + self.weights['fc1.bias']
+        x = self._relu(x)
+
+        # fc2
+        x = x @ self.weights['fc2.weight'].T + self.weights['fc2.bias']
+        x = self._relu(x)
+
+        # mean_head (use mean for deterministic inference)
+        mean = x @ self.weights['mean_head.weight'].T + self.weights['mean_head.bias']
+
+        # Tanh squashing and scale to [0, 1]
+        action = self._tanh(mean)
+        multiplier = (action + 1) / 2  # Scale from [-1, 1] to [0, 1]
+
+        return float(np.clip(multiplier, 0, 1))
+
+    def is_loaded(self) -> bool:
+        """Check if policy weights are loaded."""
+        return self.weights is not None
+
+
 
 class SplitEventsAlgorithm(QCAlgorithm):
     BACKTEST_MODE = True
+    USE_SAC_RISK_MANAGEMENT = False  # Set to True to enable SAC risk management
 
     def initialize(self):
         self.set_cash(1_000)
@@ -77,10 +160,27 @@ class SplitEventsAlgorithm(QCAlgorithm):
             self.set_warmup(timedelta(days=5))
 
         self.schedule.on(
-            self.date_rules.every_day(), 
-            self.time_rules.midnight, 
+            self.date_rules.every_day(),
+            self.time_rules.midnight,
             self._scan_for_trade_exits
         )
+
+        # SAC Risk Management Policy (numpy-only, no PyTorch)
+        self._sac_policy = None
+        self._sac_policy_key = self.get_parameter('sac_policy_key', 'policy_export_compact.json')
+        if self.USE_SAC_RISK_MANAGEMENT:
+            try:
+                if self.object_store.contains_key(self._sac_policy_key):
+                    policy_json = self.object_store.read(self._sac_policy_key)
+                    self._sac_policy = SACRiskPolicy(policy_json=policy_json)
+                    self.log(f"SAC Risk Policy loaded from Object Store: {self._sac_policy_key}")
+                else:
+                    self.log(f"SAC policy not found in Object Store: {self._sac_policy_key}")
+                    self.log("Using default risk management (no SAC)")
+                    self._sac_policy = SACRiskPolicy()  # Empty policy = multiplier always 1.0
+            except Exception as e:
+                self.log(f"Failed to load SAC policy: {e}")
+                self._sac_policy = SACRiskPolicy()  # Fallback to no adjustment
 
     def on_warmup_finished(self):
         if not self.BACKTEST_MODE:
@@ -177,6 +277,17 @@ class SplitEventsAlgorithm(QCAlgorithm):
                 if quantity == 0:
                     continue
 
+                # ===== SAC RISK MANAGEMENT =====
+                # Apply position multiplier from SAC policy
+                if self._sac_policy is not None and self._sac_policy.is_loaded():
+                    quantity = self._apply_sac_risk_adjustment(
+                        symbol, quantity, predicted_return
+                    )
+                    if quantity == 0:
+                        self.log(f"SAC Risk: Skipping {symbol} (multiplier reduced to 0)")
+                        continue
+                # ================================
+
                 security = self.securities[symbol]
                 order_value = abs(quantity) * security.price
                 if order_value < self._min_order_value:
@@ -200,9 +311,102 @@ class SplitEventsAlgorithm(QCAlgorithm):
                 trade.scan(self)
                 if trade.closed:
                     closed_trades.append(i)
-        
+
             for i in closed_trades[::-1]:
                 del trades[i]
+
+    def _get_risk_state(self, symbol, quantity, predicted_return):
+        """
+        Build the 12-dimensional state vector for SAC risk management.
+
+        State dimensions:
+            0. direction: Trade direction (1=long, -1=short, 0=flat)
+            1. size_pct: Position size as % of portfolio
+            2. days_held: Normalized days in trade (0 for new entry)
+            3. predicted_return: Model's predicted return
+            4. unrealized_pnl_pct: Current unrealized P&L % (0 for new entry)
+            5. max_drawdown_pct: Maximum drawdown (0 for new entry)
+            6. pnl_velocity: Rate of P&L change (0 for new entry)
+            7. sector_roc: Sector momentum indicator (XLK ROC)
+            8. volatility_ratio: Current vol / historical vol (estimated)
+            9. margin_usage: Current margin utilization
+            10. portfolio_heat: Total portfolio risk exposure
+            11. is_penny_stock: 1.0 if price < $5, else 0.0
+        """
+        security = self.securities[symbol]
+        portfolio_value = max(self.portfolio.total_portfolio_value, 1.0)
+
+        # Direction
+        direction = 1.0 if quantity > 0 else -1.0 if quantity < 0 else 0.0
+
+        # Size as % of portfolio
+        position_value = abs(quantity) * security.price
+        size_pct = position_value / portfolio_value
+
+        # Days held (0 for new entry)
+        days_held = 0.0
+
+        # Sector ROC
+        sector_roc = self._sector_etf.roc.current.value if self._sector_etf.roc.is_ready else 0.0
+
+        # Volatility ratio (estimate from recent moves)
+        volatility_ratio = 1.0  # Default, could be enhanced with actual calculation
+
+        # Margin usage
+        margin_used = self.portfolio.total_margin_used
+        margin_remaining = self.portfolio.margin_remaining
+        margin_usage = margin_used / (margin_used + margin_remaining) if (margin_used + margin_remaining) > 0 else 0.0
+
+        # Portfolio heat (sum of position sizes)
+        total_holdings_value = sum(
+            abs(h.holdings_value) for h in self.portfolio.values() if h.invested
+        )
+        portfolio_heat = total_holdings_value / portfolio_value if portfolio_value > 0 else 0.0
+
+        # Is penny stock check (price < $5)
+        is_penny = security.price < 5.0
+
+        state = np.array([
+            direction,           # 0
+            size_pct,            # 1
+            days_held / 3.0,     # 2 (normalized by hold duration)
+            predicted_return,    # 3
+            0.0,                 # 4 (unrealized_pnl_pct - 0 for new entry)
+            0.0,                 # 5 (max_drawdown_pct - 0 for new entry)
+            0.0,                 # 6 (pnl_velocity - 0 for new entry)
+            sector_roc,          # 7
+            volatility_ratio,    # 8
+            margin_usage,        # 9
+            portfolio_heat,      # 10
+            is_penny,            # 11 (is_penny_stock)
+        ], dtype=np.float32)
+
+        return state
+
+    def _apply_sac_risk_adjustment(self, symbol, quantity, predicted_return):
+        if self._sac_policy is None or quantity == 0:
+            return quantity
+
+        try:
+            # Build risk state
+            state = self._get_risk_state(symbol, quantity, predicted_return)
+
+            # Get position multiplier from SAC policy (numpy-only inference)
+            position_multiplier = self._sac_policy.get_position_multiplier(state)
+
+            # Apply multiplier
+            adjusted_quantity = int(quantity * position_multiplier)
+
+            # Log if significant reduction
+            if position_multiplier < 0.5:
+                self.log(f"SAC Risk: {symbol} reduced from {quantity} to {adjusted_quantity} "
+                        f"(multiplier={position_multiplier:.2f})")
+
+            return adjusted_quantity
+
+        except Exception as e:
+            self.log(f"SAC risk adjustment failed: {e}")
+            return quantity
 
 
 class Trade:

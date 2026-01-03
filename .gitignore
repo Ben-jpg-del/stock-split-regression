@@ -15,6 +15,13 @@ env/
 logs/
 *.log
 
+# Weights & Biases
+wandb/
+
+# Model checkpoints
+checkpoints/
+*.pth
+nul
 # IDE
 .vscode/
 .idea/
@@ -22,6 +29,9 @@ logs/
 *.swo
 .claude/
 
+RL/*
+!RL/risk_management/
+!RL/risk_management/**
 
 # OS
 .DS_Store
