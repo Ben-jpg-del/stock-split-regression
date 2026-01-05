@@ -714,8 +714,8 @@ def main():
     parser.add_argument('--warmup', type=int, default=100,
                         help='Warmup episodes before training')
     parser.add_argument('--reward-type', type=str, default='simple',
-                        choices=['simple', 'pnl_only', 'sac', 'sparse', 'dense', 'curriculum'],
-                        help='Reward function type (default: simple)')
+                        choices=['simple', 'pnl_only', 'sac', 'sparse', 'dense', 'curriculum', 'risk_management'],
+                        help='Reward function type (default: simple, recommended: risk_management)')
     parser.add_argument('--device', type=str, default='auto',
                         choices=['auto', 'cuda', 'cpu'],
                         help='Device to use for training')

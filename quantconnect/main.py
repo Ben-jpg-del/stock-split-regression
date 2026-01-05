@@ -9,6 +9,10 @@ from sklearn.exceptions import NotFittedError
 
 
 class SACRiskPolicy:
+    # Minimum position multiplier floor to prevent over-conservative behavior
+    # Raw output [0,1] is scaled to [MIN_MULTIPLIER, 1.0]
+    MIN_MULTIPLIER = 0.3
+
     def __init__(self, policy_json: str = None, policy_dict: dict = None):
         self.weights = None
         self.architecture = {}
@@ -46,9 +50,13 @@ class SACRiskPolicy:
         mean = x @ self.weights['mean_head.weight'].T + self.weights['mean_head.bias']
 
         action = self._tanh(mean)
-        multiplier = (action + 1) / 2
+        raw_multiplier = (action + 1) / 2  # [0, 1]
 
-        return float(np.clip(multiplier, 0, 1))
+        # Scale from [0,1] to [MIN_MULTIPLIER, 1.0] to prevent over-conservative behavior
+        # This ensures the agent always takes at least MIN_MULTIPLIER of the position
+        scaled_multiplier = self.MIN_MULTIPLIER + raw_multiplier * (1.0 - self.MIN_MULTIPLIER)
+
+        return float(np.clip(scaled_multiplier, self.MIN_MULTIPLIER, 1.0))
 
     def is_loaded(self) -> bool:
         return self.weights is not None
@@ -57,7 +65,7 @@ class SACRiskPolicy:
 
 class SplitEventsAlgorithm(QCAlgorithm):
     BACKTEST_MODE = True
-    USE_SAC_RISK_MANAGEMENT = False
+    USE_SAC_RISK_MANAGEMENT = True
 
     def initialize(self):
         self.set_cash(1_000)
@@ -132,7 +140,7 @@ class SplitEventsAlgorithm(QCAlgorithm):
         )
 
         self._sac_policy = None
-        self._sac_policy_key = self.get_parameter('sac_policy_key', 'policy_export_compact.json')
+        self._sac_policy_key = self.get_parameter('sac_policy_key', 'policy_export.json')
         if self.USE_SAC_RISK_MANAGEMENT:
             try:
                 if self.object_store.contains_key(self._sac_policy_key):

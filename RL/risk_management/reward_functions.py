@@ -30,9 +30,39 @@ class RiskRewardConfig:
 @dataclass
 class SimpleRewardConfig:
 
-    margin_call_penalty: float = -10.0      
-    pnl_scale: float = 1.0                  
-    transaction_cost: float = 0.001         
+    margin_call_penalty: float = -10.0
+    pnl_scale: float = 1.0
+    transaction_cost: float = 0.001
+
+
+@dataclass
+class RiskManagementConfig:
+    """Configuration for trajectory-based risk management rewards.
+
+    Key principle: Reward APPROPRIATE risk decisions, not raw P&L.
+    The agent should learn WHEN to reduce/increase positions based on
+    risk signals, not that "all positions are bad."
+    """
+    # Catastrophic event penalty
+    margin_call_penalty: float = -50.0
+
+    # Trajectory-based rewards (the core of risk management)
+    cut_loser_bonus: float = 2.0           # Reward for reducing deteriorating positions
+    hold_loser_penalty: float = -0.5       # Per-step penalty for holding losing positions
+    let_winner_run_bonus: float = 1.0      # Reward for maintaining winning positions
+    conviction_bonus: float = 0.5          # Bonus for full position on improving trajectory
+
+    # Risk signal response rewards
+    drawdown_response_bonus: float = 1.5   # Reward for reducing during drawdown
+    volatility_response_bonus: float = 1.0 # Reward for reducing during high volatility
+
+    # Anti-whipsaw (prevent noisy position changes)
+    whipsaw_penalty: float = -0.3          # Penalty for rapid position changes
+    whipsaw_threshold: float = 0.3         # Position change that triggers penalty
+
+    # Trajectory detection thresholds
+    trajectory_window: int = 3             # Steps to consider for trajectory
+    deteriorating_threshold: float = -0.01 # P&L change to count as deteriorating         
 
 
 class SACRiskReward:
@@ -288,9 +318,150 @@ class PnLOnlyReward:
         self._cumulative_pnl += pnl_change
 
         if info.get('trade_closed', False):
-            return self._cumulative_pnl * 100  
+            return self._cumulative_pnl * 100
 
         return 0.0
+
+
+class RiskManagementReward:
+    """Trajectory-based risk management reward function.
+
+    Key design principles:
+    1. NO direct P&L rewards - the agent shouldn't chase profits
+    2. Reward based on TRAJECTORY - cut losers, let winners run
+    3. Allow full position (multiplier=1.0) when conditions are favorable
+    4. Only penalize BAD risk decisions, not position-taking itself
+
+    This prevents the agent from learning "avoid all positions" and instead
+    teaches it WHEN to reduce positions based on risk signals.
+    """
+
+    def __init__(self, config: Optional[RiskManagementConfig] = None):
+        self.config = config or RiskManagementConfig()
+        self.pnl_history = deque(maxlen=self.config.trajectory_window)
+        self.position_history = deque(maxlen=3)
+
+    def reset(self):
+        self.pnl_history.clear()
+        self.position_history.clear()
+
+    def _get_trajectory(self) -> str:
+        """Determine P&L trajectory: 'improving', 'deteriorating', or 'flat'."""
+        if len(self.pnl_history) < 2:
+            return 'flat'
+
+        recent = list(self.pnl_history)
+        # Compare end to beginning
+        pnl_change = recent[-1] - recent[0]
+
+        if pnl_change > self.config.deteriorating_threshold:
+            return 'improving'
+        elif pnl_change < self.config.deteriorating_threshold:
+            return 'deteriorating'
+        return 'flat'
+
+    def calculate_reward(
+        self,
+        state: np.ndarray,
+        action: float,
+        next_state: np.ndarray,
+        info: Dict
+    ) -> float:
+        """Calculate reward based on risk management quality, not raw P&L."""
+        reward = 0.0
+        cfg = self.config
+
+        # Margin call is catastrophic - strong penalty
+        if info.get('margin_call', False):
+            return cfg.margin_call_penalty
+
+        # Get current state
+        position_mult = (action + 1) / 2  # Map [-1,1] to [0,1]
+        unrealized_pnl = info.get('unrealized_pnl_pct', 0.0)
+        old_position = info.get('old_position', 1.0)
+        max_drawdown = info.get('max_drawdown_pct', 0.0)
+        volatility_ratio = info.get('volatility_ratio', 1.0)
+
+        # Track P&L history for trajectory
+        self.pnl_history.append(unrealized_pnl)
+        trajectory = self._get_trajectory()
+
+        # ============================================================
+        # CORE RISK MANAGEMENT REWARDS
+        # ============================================================
+
+        # 1. DETERIORATING POSITION (P&L getting worse)
+        if trajectory == 'deteriorating':
+            if position_mult < old_position:
+                # GOOD: Cutting a losing position
+                reduction = old_position - position_mult
+                reward += cfg.cut_loser_bonus * reduction
+            else:
+                # BAD: Holding or increasing a deteriorating position
+                reward += cfg.hold_loser_penalty
+
+        # 2. IMPROVING POSITION (P&L getting better)
+        elif trajectory == 'improving':
+            if position_mult >= 0.7:
+                # GOOD: Letting winner run with conviction
+                reward += cfg.let_winner_run_bonus
+                if position_mult >= 0.9:
+                    # Extra bonus for full conviction on winners
+                    reward += cfg.conviction_bonus
+
+        # 3. UNDERWATER POSITION (current P&L is negative)
+        if unrealized_pnl < 0:
+            # Only penalize if not actively cutting
+            if position_mult >= old_position:
+                reward += cfg.hold_loser_penalty * 0.5
+
+        # ============================================================
+        # RISK SIGNAL RESPONSE REWARDS
+        # ============================================================
+
+        # 4. DRAWDOWN RESPONSE
+        if max_drawdown > 0.10:  # 10% drawdown threshold
+            if position_mult < 0.5:
+                # GOOD: Reducing exposure during significant drawdown
+                reward += cfg.drawdown_response_bonus
+            elif position_mult > 0.8:
+                # BAD: Full position during high drawdown
+                reward -= cfg.drawdown_response_bonus * 0.5
+
+        # 5. VOLATILITY RESPONSE
+        if volatility_ratio > 1.5:  # High volatility
+            if position_mult < 0.7:
+                # GOOD: Reducing during high volatility
+                reward += cfg.volatility_response_bonus
+            elif position_mult > 0.9:
+                # BAD: Full position during high volatility
+                reward -= cfg.volatility_response_bonus * 0.3
+
+        # ============================================================
+        # ANTI-WHIPSAW (prevent noisy trading)
+        # ============================================================
+
+        position_change = abs(position_mult - old_position)
+        if position_change > cfg.whipsaw_threshold:
+            reward += cfg.whipsaw_penalty
+
+        # ============================================================
+        # TRADE OUTCOME BONUS (sparse reward at trade end)
+        # ============================================================
+
+        if info.get('trade_closed', False):
+            realized_pnl = info.get('realized_pnl_pct', 0.0)
+            days_held = info.get('days_held', 3)
+
+            # Bonus for exiting a loser early
+            if realized_pnl < 0 and days_held < 2:
+                reward += 3.0
+
+            # Bonus for riding a winner
+            if realized_pnl > 0.05 and days_held >= 2:
+                reward += 2.0
+
+        return reward
 
 
 def create_reward_function(
@@ -304,6 +475,7 @@ def create_reward_function(
         'sparse': (SparseRiskReward, RiskRewardConfig),
         'dense': (DenseRiskReward, RiskRewardConfig),
         'curriculum': (CurriculumRiskReward, RiskRewardConfig),
+        'risk_management': (RiskManagementReward, RiskManagementConfig),
     }
 
     if reward_type not in reward_classes:
@@ -363,7 +535,7 @@ if __name__ == "__main__":
     print("REWARD FUNCTION COMPARISON")
     print("=" * 60)
 
-    for rtype in ['simple', 'pnl_only', 'sac', 'sparse']:
+    for rtype in ['simple', 'pnl_only', 'sac', 'sparse', 'risk_management']:
         rf = create_reward_function(rtype)
         rf.reset()
 
@@ -382,5 +554,8 @@ if __name__ == "__main__":
         print(f"  Trade close:       {r_close:+8.4f}")
 
     print("\n" + "=" * 60)
-    print("RECOMMENDATION: Use 'simple' for cleaner learning signal")
+    print("RECOMMENDATION: Use 'risk_management' for proper position sizing")
+    print("  - Rewards appropriate risk decisions, not raw P&L")
+    print("  - Allows full position when trajectory is improving")
+    print("  - Penalizes holding losers, rewards cutting them early")
     print("=" * 60)

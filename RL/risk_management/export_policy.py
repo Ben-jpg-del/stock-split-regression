@@ -31,10 +31,16 @@ def export_policy_to_json(checkpoint_path: str, output_path: str = None):
     # Extract actor network state dict
     actor_state = checkpoint['actor_state_dict']
 
-    # Convert to numpy and prepare for JSON serialization
-    weights = {}
-    for key, tensor in actor_state.items():
-        weights[key] = tensor.numpy().tolist()
+    # Map PyTorch keys to the format expected by SACRiskPolicy in main.py
+    # GaussianPolicy: feature.0 -> fc1, feature.2 -> fc2
+    weights = {
+        'fc1.weight': actor_state['feature.0.weight'].numpy().tolist(),
+        'fc1.bias': actor_state['feature.0.bias'].numpy().tolist(),
+        'fc2.weight': actor_state['feature.2.weight'].numpy().tolist(),
+        'fc2.bias': actor_state['feature.2.bias'].numpy().tolist(),
+        'mean_head.weight': actor_state['mean_head.weight'].numpy().tolist(),
+        'mean_head.bias': actor_state['mean_head.bias'].numpy().tolist(),
+    }
 
     # Also save network architecture info
     export_data = {
@@ -99,8 +105,10 @@ import json
 class SACRiskPolicy:
     """
     Numpy-only implementation of SAC actor for risk management.
-    Outputs position multiplier [0, 1] given trade state.
+    Outputs position multiplier [MIN_MULTIPLIER, 1.0] given trade state.
     """
+    # Minimum floor to prevent over-conservative behavior
+    MIN_MULTIPLIER = 0.3
 
     def __init__(self, policy_json_path: str = None, policy_dict: dict = None):
         """
@@ -142,9 +150,9 @@ class SACRiskPolicy:
                    Note: predicted_return was removed to prevent data leakage
 
         Returns:
-            Position multiplier in [0, 1]
+            Position multiplier in [MIN_MULTIPLIER, 1.0]
             - 1.0 = full position (no risk reduction)
-            - 0.0 = close position entirely
+            - MIN_MULTIPLIER = minimum position (maximum reduction)
         """
         if self.weights is None:
             return 1.0  # Default: no risk adjustment
@@ -165,16 +173,19 @@ class SACRiskPolicy:
 
         # Tanh squashing and scale to [0, 1]
         action = self._tanh(mean)
-        multiplier = (action + 1) / 2  # Scale from [-1, 1] to [0, 1]
+        raw_multiplier = (action + 1) / 2  # Scale from [-1, 1] to [0, 1]
 
-        return float(np.clip(multiplier, 0, 1))
+        # Scale to [MIN_MULTIPLIER, 1.0] to prevent over-conservative behavior
+        scaled = self.MIN_MULTIPLIER + raw_multiplier * (1.0 - self.MIN_MULTIPLIER)
+
+        return float(np.clip(scaled, self.MIN_MULTIPLIER, 1.0))
 
     def should_reduce_position(self, state: np.ndarray, threshold: float = 0.7) -> bool:
         """Check if policy recommends reducing position."""
         return self.get_position_multiplier(state) < threshold
 
-    def should_close_position(self, state: np.ndarray, threshold: float = 0.3) -> bool:
-        """Check if policy recommends closing position."""
+    def should_close_position(self, state: np.ndarray, threshold: float = 0.4) -> bool:
+        """Check if policy recommends significant reduction (near minimum)."""
         return self.get_position_multiplier(state) < threshold
 
 
@@ -235,13 +246,23 @@ def main():
     print("\n" + "="*60)
     print("NEXT STEPS FOR QUANTCONNECT DEPLOYMENT")
     print("="*60)
-    print("1. Upload policy_export_compact.json to QC Object Store")
-    print("2. In your algorithm's Initialize():")
-    print("   policy_json = self.ObjectStore.Read('policy_export_compact.json')")
-    print("   self.risk_policy = SACRiskPolicy(policy_dict=json.loads(policy_json))")
-    print("3. In your trading logic:")
-    print("   multiplier = self.risk_policy.get_position_multiplier(state)")
-    print("   adjusted_quantity = base_quantity * multiplier")
+    print("""
+1. Upload to QuantConnect Object Store:
+
+   Option A - Web Interface (easiest):
+     - Go to quantconnect.com -> Your Project
+     - Click 'Object Store' in left sidebar
+     - Click 'Upload' and select the _compact.json file
+
+   Option B - Lean CLI:
+     lean object-store set policy_export_compact.json <path_to_file>
+
+2. Enable SAC in your algorithm (main.py line 60):
+   USE_SAC_RISK_MANAGEMENT = True
+
+3. Run backtest - logs will show position adjustments like:
+   "SAC Risk: AAPL reduced from 100 to 65 (multiplier=0.65)"
+""")
     print("="*60)
 
 
